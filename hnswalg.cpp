@@ -28,6 +28,8 @@
 #include <cmath>
 #include <queue>
 #include <stdexcept>
+#include <limits>
+
 
 extern "C" {
 #include "embedding.h"
@@ -285,7 +287,7 @@ bool hnsw_search(HnswMetadata* meta, const coord_t *point, size_t* n_results, la
     {
         std::priority_queue<std::pair<dist_t, label_t>> result;
 
-        if (filter_id == -1)
+        if (filter_id == std::numeric_limits<idx_t>::max())
             result = searchKnn(meta, point, meta->efSearch);
         else
             result = searchKnnWithFilter(meta, point, meta->efSearch, filter_id);
