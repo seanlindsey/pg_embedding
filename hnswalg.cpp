@@ -251,30 +251,63 @@ std::priority_queue<std::pair<dist_t, label_t>> searchKnn(HnswMetadata* meta, co
     return topResults;
 }
 
+std::priority_queue<std::pair<dist_t, label_t>> searchKnnWithFilter(HnswMetadata* meta, const coord_t *query_data, size_t k, idx_t filter_id) {
+    std::priority_queue<std::pair<dist_t, label_t>> topResults;
+    auto topCandidates = searchBaseLayer(meta, query_data, k);
 
+    while (topCandidates.size() > k) {
+        topCandidates.pop();
+    }
 
-bool hnsw_search(HnswMetadata* meta, const coord_t *point, size_t* n_results, label_t** results)
-{
-	try
-	{
-		auto result = searchKnn(meta, point, meta->efSearch);
-		size_t nResults = result.size();
-		*results = (label_t*)malloc(nResults*sizeof(label_t));
-		if (*results == NULL)
-			return false;
-		for (size_t i = nResults; i-- != 0;)
-		{
-			(*results)[i] = result.top().second;
-			result.pop();
-		}
-		*n_results = nResults;
-		return true;
-	}
-	catch (std::exception& x)
-	{
-		return false;
-	}
+    while (!topCandidates.empty()) {
+        std::pair<dist_t, idx_t> rez = topCandidates.top();
+        label_t label;
+
+        hnsw_begin_read(meta, rez.second, NULL, NULL, &label);
+        idx_t id = *hnsw->getExternalLabel(label);
+        hnsw_end_read(meta);
+
+        if (id == filter_id && !hnsw_is_deleted(label)) {
+            topResults.push(std::pair<dist_t, label_t>(rez.first, label));
+        }
+        
+        topCandidates.pop();
+    }
+
+    return topResults;
 }
+
+
+
+bool hnsw_search(HnswMetadata* meta, const coord_t *point, size_t* n_results, label_t** results, idx_t filter_id = -1)
+{
+    try
+    {
+        std::priority_queue<std::pair<dist_t, label_t>> result;
+
+        if (filter_id == -1)
+            result = searchKnn(meta, point, meta->efSearch);
+        else
+            result = searchKnnWithFilter(meta, point, meta->efSearch, filter_id);
+
+        size_t nResults = result.size();
+        *results = (label_t*)malloc(nResults*sizeof(label_t));
+        if (*results == NULL)
+            return false;
+        for (size_t i = nResults; i-- != 0;)
+        {
+            (*results)[i] = result.top().second;
+            result.pop();
+        }
+        *n_results = nResults;
+        return true;
+    }
+    catch (std::exception& x)
+    {
+        return false;
+    }
+}
+
 
 bool hnsw_bind_point(HnswMetadata* meta, const coord_t *point, idx_t cur)
 {

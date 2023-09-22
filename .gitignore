@@ -4,6 +4,7 @@
 *.dylib
 *.bc
 .deps/
+.vscode/
 
 # `make installcheck` artifacts
 results/

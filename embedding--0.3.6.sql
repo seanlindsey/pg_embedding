@@ -15,6 +15,12 @@
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION embedding" to load this file. \quit
 
+CREATE TYPE idembedding AS (
+    id int,
+    vector real[]
+);
+
+
 -- functions
 
 CREATE FUNCTION l2_distance(real[], real[]) RETURNS real
@@ -25,6 +31,9 @@ CREATE FUNCTION cosine_distance(real[], real[]) RETURNS real
 
 CREATE FUNCTION manhattan_distance(real[], real[]) RETURNS real
 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION id_cosine_distance(idembedding, idembedding) RETURNS real
+    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- operators
 
@@ -42,6 +51,12 @@ CREATE OPERATOR <~> (
 	LEFTARG = real[], RIGHTARG = real[], PROCEDURE = manhattan_distance,
 	COMMUTATOR = '<~>'
 );
+
+CREATE OPERATOR *<=> (
+    LEFTARG = idembedding, RIGHTARG = idembedding, PROCEDURE = id_cosine_distance,
+    COMMUTATOR = '*<=>'
+);
+
 
 -- access method
 
@@ -68,3 +83,8 @@ CREATE OPERATOR CLASS ann_manhattan_ops
 	FOR TYPE real[] USING hnsw AS
 	OPERATOR 1 <~> (real[], real[]) FOR ORDER BY float_ops,
 	FUNCTION 1 manhattan_distance(real[], real[]);
+
+CREATE OPERATOR CLASS id_ann_cos_ops
+    DEFAULT FOR TYPE idembedding USING hnsw AS
+    OPERATOR 1 *<=> (idembedding, idembedding) FOR ORDER BY float_ops,
+    FUNCTION 1 id_cosine_distance(idembedding, idembedding);
