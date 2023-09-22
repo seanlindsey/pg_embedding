@@ -266,7 +266,7 @@ std::priority_queue<std::pair<dist_t, label_t>> searchKnnWithFilter(HnswMetadata
         label_t label;
 
         hnsw_begin_read(meta, rez.second, NULL, NULL, &label);
-        idx_t id = *hnsw->getExternalLabel(label);
+        idx_t id = *(meta->getExternalLabel(label));
         hnsw_end_read(meta);
 
         if (id == filter_id && !hnsw_is_deleted(label)) {
