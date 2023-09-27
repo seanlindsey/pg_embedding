@@ -47,11 +47,17 @@ PGDLLEXPORT PG_FUNCTION_INFO_V1(l2_distance);
 PGDLLEXPORT PG_FUNCTION_INFO_V1(cosine_distance);
 PGDLLEXPORT PG_FUNCTION_INFO_V1(manhattan_distance);
 
+typedef struct
+{
+	int id;
+	ArrayType* vector;
+} IdEmbedding;
+
 typedef union {
 	label_t label;
 	struct {
 		ItemPointerData tid;
-		uint16			flags;
+		uint16	flags;
 	} pg;
 } HnswLabel;
 
@@ -102,7 +108,7 @@ typedef struct {
 	size_t curr;
 	size_t n_results;
 	bool   no_more_results;
-	ArrayType*	key;
+	IdEmbedding*	key;
 	ItemPointer results;
 } HnswScanOpaqueData;
 
@@ -150,6 +156,48 @@ _PG_init(void)
 	hnsw_init_dist_func();
 }
 
+static IdEmbedding DatumToIdEmbedding(Datum value) {
+    IdEmbedding result;
+    HeapTupleHeader td;
+    Oid tupType;
+    int32 tupTypmod;
+    TupleDesc tupdesc;
+    HeapTupleData tmptup;
+    Datum idDatum, vectorDatum;
+    bool isNull;
+
+    // Convert Datum to HeapTupleHeader
+    td = DatumGetHeapTupleHeader(value);
+
+    // Get the composite type's TupleDesc
+    tupType = HeapTupleHeaderGetTypeId(td);
+    tupTypmod = HeapTupleHeaderGetTypMod(td);
+    tupdesc = lookup_rowtype_tupdesc(tupType, tupTypmod);
+
+    // Set up a temporary HeapTuple control structure so we can use the regular heap tuple routines
+    tmptup.t_len = HeapTupleHeaderGetDatumLength(td);
+    ItemPointerSetInvalid(&(tmptup.t_self));
+    tmptup.t_tableOid = InvalidOid;
+    tmptup.t_data = td;
+
+    // Extract the 'id' field
+    idDatum = heap_getattr(&tmptup, 1, tupdesc, &isNull);
+    if (isNull)
+        elog(ERROR, "id is null");
+    result.id = DatumGetInt32(idDatum);
+
+    // Extract the 'vector' field
+    vectorDatum = heap_getattr(&tmptup, 2, tupdesc, &isNull);
+    if (isNull)
+        elog(ERROR, "vector is null");
+    result.vector = DatumGetArrayTypeP(vectorDatum);
+
+    // Clean up
+    ReleaseTupleDesc(tupdesc);
+
+    return result;
+}
+
 static void
 hnsw_build_callback(Relation index,
 #if PG_VERSION_NUM >= 130000
@@ -160,6 +208,7 @@ hnsw_build_callback(Relation index,
 					Datum *values, bool *isnull, bool tupleIsAlive, void *state)
 {
 	HnswIndex* hnsw = (HnswIndex*) state;
+	IdEmbedding idemb; // changed to non-pointer for stack allocation
 	ArrayType* array;
 	int n_items;
 	HnswLabel u;
@@ -172,7 +221,9 @@ hnsw_build_callback(Relation index,
 	if (isnull[0])
 		return;
 
-	array = DatumGetArrayTypePCopy(values[0]);
+	// Extract vector data
+	idemb = DatumToIdEmbedding(values[0]); // adjusted for non-pointer usage
+	array = idemb.vector;
 	n_items = ArrayGetNItems(ARR_NDIM(array), ARR_DIMS(array));
 	if (n_items != hnsw->meta.dim)
 	{
@@ -256,7 +307,7 @@ hnsw_beginscan(Relation index, int nkeys, int norderbys)
 	so->n_results = 0;
 	so->results = NULL;
 	so->no_more_results = true;
-	so->key = NULL;
+	so->key->vector = NULL;
 	scan->opaque = so;
 	return scan;
 }
@@ -308,13 +359,13 @@ hnsw_gettuple(IndexScanDesc scan, ScanDirection dir)
 			return false;
 
 		value = scan->orderByData->sk_argument;
-		so->key = DatumGetArrayTypePCopy(value);
-		n_items = ArrayGetNItems(ARR_NDIM(so->key), ARR_DIMS(so->key));
+		so->key->vector = DatumGetArrayTypePCopy(value);
+		n_items = ArrayGetNItems(ARR_NDIM(so->key->vector), ARR_DIMS(so->key->vector));
 		if (n_items != so->hnsw->meta.dim)
 			elog(ERROR, "Wrong number of dimensions: %d instead of %d expected",
 				 n_items, (int)so->hnsw->meta.dim);
 
-		if (!hnsw_search(&so->hnsw->meta, (coord_t*)ARR_DATA_PTR(so->key), &n_results, &results))
+		if (!hnsw_search(&so->hnsw->meta, (coord_t*)ARR_DATA_PTR(so->key->vector), &n_results, &results))
 			elog(ERROR, "HNSW index search failed");
 
 		so->results = (ItemPointer)palloc(n_results*sizeof(ItemPointerData));
@@ -332,7 +383,7 @@ hnsw_gettuple(IndexScanDesc scan, ScanDirection dir)
 			return false;
 
 		so->hnsw->meta.efSearch *= 2;
-		if (!hnsw_search(&so->hnsw->meta, (coord_t*)ARR_DATA_PTR(so->key), &n_results, &results))
+		if (!hnsw_search(&so->hnsw->meta, (coord_t*)ARR_DATA_PTR(so->key->vector), &n_results, &results))
 			elog(ERROR, "HNSW index search failed");
 
 		if (n_results <= so->n_results)
@@ -376,8 +427,8 @@ static void
 hnsw_endscan(IndexScanDesc scan)
 {
 	HnswScanOpaque so = (HnswScanOpaque) scan->opaque;
-	if (so->key)
-		pfree(so->key);
+	if (so->key->vector)
+		pfree(so->key->vector);
 	if (so->results)
 		pfree(so->results);
 	if (so->hnsw)
@@ -561,6 +612,7 @@ hnsw_insert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid,
 #endif
 			IndexInfo *indexInfo)
 {
+	IdEmbedding* idemb;
 	ArrayType* array;
 	int n_items;
 	HnswLabel u;
@@ -574,7 +626,8 @@ hnsw_insert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid,
 	hnsw = hnsw_get_index(index);
 
 	/* Detoast value */
-	array = DatumGetArrayTypePCopy(values[0]);
+	idemb = DatumToIdEmbedding(values[0]);
+	array = idemb.vector;
 	n_items = ArrayGetNItems(ARR_NDIM(array), ARR_DIMS(array));
 	if (n_items != hnsw->meta.dim)
 	{
@@ -1040,23 +1093,23 @@ calc_distance(dist_func_t dist, ArrayType *a, ArrayType *b)
 Datum
 l2_distance(PG_FUNCTION_ARGS)
 {
-	ArrayType  *a = PG_GETARG_ARRAYTYPE_P(0);
-	ArrayType  *b = PG_GETARG_ARRAYTYPE_P(1);
+	IdEmbedding  *a = PG_GETARG_ARRAYTYPE_P(0);
+	IdEmbedding  *b = PG_GETARG_ARRAYTYPE_P(1);
 	PG_RETURN_FLOAT4(calc_distance(DIST_L2, a, b));
 }
 
 Datum
 cosine_distance(PG_FUNCTION_ARGS)
 {
-	ArrayType  *a = PG_GETARG_ARRAYTYPE_P(0);
-	ArrayType  *b = PG_GETARG_ARRAYTYPE_P(1);
+	IdEmbedding  *a = PG_GETARG_ARRAYTYPE_P(0);
+	IdEmbedding  *b = PG_GETARG_ARRAYTYPE_P(1);
 	PG_RETURN_FLOAT4(calc_distance(DIST_COSINE, a, b));
 }
 
 Datum
 manhattan_distance(PG_FUNCTION_ARGS)
 {
-	ArrayType  *a = PG_GETARG_ARRAYTYPE_P(0);
-	ArrayType  *b = PG_GETARG_ARRAYTYPE_P(1);
+	IdEmbedding  *a = PG_GETARG_ARRAYTYPE_P(0);
+	IdEmbedding  *b = PG_GETARG_ARRAYTYPE_P(1);
 	PG_RETURN_FLOAT4(calc_distance(DIST_MANHATTAN, a, b));
 }
