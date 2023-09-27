@@ -253,6 +253,11 @@ std::priority_queue<std::pair<dist_t, label_t>> searchKnn(HnswMetadata* meta, co
     return topResults;
 }
 
+idx_t hnsw_get_id(label_t label)
+{
+    return label >> 1;
+}
+
 std::priority_queue<std::pair<dist_t, label_t>> searchKnnWithFilter(HnswMetadata* meta, const coord_t *query_data, size_t k, idx_t filter_id) {
     std::priority_queue<std::pair<dist_t, label_t>> topResults;
     auto topCandidates = searchBaseLayer(meta, query_data, k);
@@ -266,14 +271,14 @@ std::priority_queue<std::pair<dist_t, label_t>> searchKnnWithFilter(HnswMetadata
         label_t label;
 
         hnsw_begin_read(meta, rez.second, NULL, NULL, &label);
-        idx_t id = *(meta->getExternalLabel(label));
-        hnsw_end_read(meta);
-
+        
+        idx_t id = hnsw_get_id(label);
         if (id == filter_id && !hnsw_is_deleted(label)) {
             topResults.push(std::pair<dist_t, label_t>(rez.first, label));
         }
         
         topCandidates.pop();
+        hnsw_end_read(meta);
     }
 
     return topResults;

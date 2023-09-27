@@ -53,6 +53,11 @@ typedef union {
 		ItemPointerData tid;
 		uint16			flags;
 	} pg;
+	struct {
+        ItemPointerData tid;
+        uint16          flags;
+        int32           filter_id;
+    } pg_with_filter;
 } HnswLabel;
 
 /*
@@ -73,6 +78,22 @@ typedef struct {
 	size_t			n_buffers; /* Number of simultaneously accessed buffers */
 	Buffer			buffers[HNSW_STACK_SIZE];
 } HnswIndex;
+
+/*
+ * Table to hold filter ids
+ */
+typedef struct {
+	int32 filter_id;
+	label_t label;
+} FilterTab;
+
+/*
+ * HNSW index lookup table for filter id
+ */
+typedef struct HnswWithData {
+    HnswIndex *hnsw;
+    FilterTab *idLookup; // A hash table mapping label_t to int32 IDs
+} HnswWithData;
 
 /*
  * This information in each HNSW page allows to detectincorrect metadata modification (ALTER INDEX)
@@ -591,6 +612,50 @@ hnsw_insert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid,
 	return success;
 }
 
+static bool
+idembedding_hnsw_insert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid,
+			Relation heap, IndexUniqueCheck checkUnique,
+#if PG_VERSION_NUM >= 140000
+			bool indexUnchanged,
+#endif
+			IndexInfo *indexInfo)
+{
+	ArrayType* array;
+	int n_items;
+	HnswLabel u;
+	HnswWithData* idhnsw;
+	bool success;
+
+	/* Skip nulls */
+	if (isnull[0])
+		return false;
+
+	idhnsw = (HnswWithData*)palloc(sizeof(HnswWithData));
+	idhnsw->hnsw = hnsw_get_index(index);
+	idhnsw->idLookup = (FilterTab*)palloc(sizeof(FilterTab));
+	idhnsw->idLookup->filter_id = DatumGetInt32(values[1]);
+	idhnsw->idLookup->label = 0;
+
+	/* Detoast value */
+	array = DatumGetArrayTypePCopy(values[0]);
+	n_items = ArrayGetNItems(ARR_NDIM(array), ARR_DIMS(array));
+	if (n_items != idhnsw->hnsw->meta.dim)
+	{
+		elog(ERROR, "Wrong number of dimensions: %d instead of %d expected",
+			 n_items, (int)idhnsw->hnsw->meta.dim);
+	}
+
+	u.pg_with_filter.tid = *heap_tid;
+	u.pg_with_filter.flags = 0;
+	u.pg_with_filter.filter_id = idhnsw->idLookup->filter_id;
+
+	success = hnsw_add_point(idhnsw->hnsw, (coord_t*)ARR_DATA_PTR(array), u.label);
+	pfree(array);
+	pfree(idhnsw->idLookup);
+	pfree(idhnsw);
+	return success;
+}
+
 static void hnsw_check_meta(HnswMetadata* meta, Page page)
 {
 	HnswPageOpaque* opq = (HnswPageOpaque*)PageGetSpecialPointer(page);
@@ -601,6 +666,13 @@ static void hnsw_check_meta(HnswMetadata* meta, Page page)
 	}
 }
 
+static bool idhnsw_add_point(HnswWithData* idhnsw, coord_t const* coord, label_t label)
+{
+	HnswIndex* hnsw = idhnsw->hnsw;
+	FilterTab* idLookup = idhnsw->idLookup;
+	
+	return hnsw_add_point(hnsw, coord, label);
+}
 
 
 static bool hnsw_add_point(HnswIndex* hnsw, coord_t const* coord, label_t label)
